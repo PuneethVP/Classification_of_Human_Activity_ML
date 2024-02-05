@@ -1,0 +1,472 @@
+---
+title: "Machine learning project enhancement"
+author: "Puneeth Virushabadas"
+date: "2023-11-30"
+output: html_document
+---
+```{r}
+library(ggplot2)
+library(tidyr)
+library(stats)
+library(glmnet)
+library(randomForest)
+library(caret)
+library(gbm)
+library(e1071)
+library(caret)
+library(randomForest)
+library(dplyr)
+library(boot)
+library(reshape2)
+
+```
+
+
+
+```{r}
+
+aw_fb_data <- read.csv("data/raw/aw_fb_data.csv")
+head(aw_fb_data)
+summary(aw_fb_data)
+names(aw_fb_data)
+
+
+#Cleaning the data
+columns_to_drop <- c("X1", "X", "device", "entropy_heart", "entropy_setps", "corr_heart_steps", "norm_heart", "sd_norm_heart")
+aw_fb_data <- aw_fb_data[, !(names(aw_fb_data) %in% columns_to_drop)]
+colnames(aw_fb_data)[colnames(aw_fb_data) == "hear_rate"] <- "heart_rate"
+
+
+
+```
+```{r}
+
+# Convert activity column to lowercase for consistent comparison
+aw_fb_data <- aw_fb_data %>%
+  mutate(activity = tolower(activity))
+
+# Define variations of activity names to remove
+activities_to_remove <- c("lying", "running 7 mets", "sitting")
+
+# Filter out rows with specified activity values
+cleaned_data <- aw_fb_data %>%
+  filter(!activity %in% activities_to_remove)
+
+
+new_dataset_without_outliers <- cleaned_data
+```
+```{r}
+head(new_dataset_without_outliers)
+dim(new_dataset_without_outliers)
+```
+
+```{r}
+
+
+# Basic scatter plot to visualize the relationship between 'steps' and 'calories'
+ggplot(new_dataset_without_outliers, aes(x = steps, y = calories)) + geom_point() + labs(title = "Scatter Plot of Steps vs. Calories", x = "Steps", y = "Calories")
+
+# Barplot for Activity Distribution
+ggplot(new_dataset_without_outliers, aes(x = activity)) +
+  geom_bar() +
+  labs(title = "Distribution of Activities", x = "Activity", y = "Count")
+
+# Boxplot to compare calories across different activities
+ggplot(new_dataset_without_outliers, aes(x = activity, y = calories)) + geom_boxplot() + labs(title = "Boxplot of Calories by Activity", x = "Activity", y = "Calories")
+
+# Selecting numerical variables for correlation heatmap
+cor_variables <- c("age", "gender", "height", "weight", "steps", "heart_rate", "calories", "distance", "resting_heart", "intensity_karvonen", "steps_times_distance")
+
+# Reshape the data for the correlation heatmap
+cor_matrix <- cor(new_dataset_without_outliers[, cor_variables])
+cor_matrix_long <- as.data.frame(as.table(cor_matrix))
+colnames(cor_matrix_long) <- c("Var1", "Var2", "Correlation")
+
+# Plot the correlation heatmap
+library(ggplot2)
+ggplot(data = cor_matrix_long, aes(x = Var1, y = Var2, fill = Correlation)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(title = "Correlation Heatmap")
+```
+
+```{r}
+aw_fb_data <- new_dataset_without_outliers
+dim(aw_fb_data)
+
+### cleaning the data
+columns_to_drop <- c("activity")
+aw_fb_data_reg <- aw_fb_data[, !(names(aw_fb_data) %in% columns_to_drop)]
+
+### checking for null values
+any_na_values <- any(is.na(aw_fb_data_reg))
+print(any_na_values)
+
+```
+
+```{r}
+
+# Remove constant columns
+constant_cols <- sapply(aw_fb_data, function(x) length(unique(x))) == 1
+data_pca <- aw_fb_data[, !constant_cols]
+
+# Handle missing values (imputation or removal)
+# For imputation, you can use packages like 'mice', 'missForest', or 'imputeTS'
+# Perform appropriate handling of missing values in 'data_pca'
+
+# Perform PCA after handling missing values and removing constant columns
+pca_result <- prcomp(data_pca[, -which(names(data_pca) == "activity")], scale. = TRUE, center = TRUE)
+
+# Accessing loadings and scores
+loadings <- pca_result$rotation # Loadings
+scores <- pca_result$x # Scores
+
+# Calculate proportion of variance explained by each PC
+prop_var <- (pca_result$sdev^2) / sum(pca_result$sdev^2)
+
+# Create a cumulative proportion of variance explained
+cumulative_prop_var <- cumsum(prop_var)
+
+# Plotting variance explained by each principal component
+plot(prop_var, type = 'b', xlab = "Principal Component", ylab = "Proportion of Variance Explained",
+     main = "Variance Explained by Principal Components")
+
+# Plotting cumulative proportion of variance explained
+plot(cumulative_prop_var, type = 'b', xlab = "Principal Component", ylab = "Cumulative Proportion of Variance Explained",
+     main = "Cumulative Variance Explained by Principal Components")
+
+# Accessing specific components (e.g., PC1 and PC2)
+pc1 <- scores[, 1] # PC1 scores
+pc2 <- scores[, 2] # PC2 scores
+
+# Create a data frame with PC1, PC2, and activity labels
+pc_df <- data.frame(PC1 = pc1, PC2 = pc2, Activity = data_pca$activity)
+
+# Plotting PC1 vs PC2 and coloring points by 'activity' with class labels highlighted
+
+ggplot(pc_df, aes(x = PC1, y = PC2, color = Activity)) +
+  geom_point() +
+  labs(x = "PC1", y = "PC2", title = "Principal Component Plot with Activity Classes")
+
+```
+
+
+
+
+```{r}
+# split into test and train
+index <- sample(1:nrow(aw_fb_data_reg), 0.7 * nrow(aw_fb_data_reg))
+
+train_data <- aw_fb_data_reg[index, ]
+test_data <- aw_fb_data_reg[-index, ]
+```
+
+```{r}
+# Number of folds for cross-validation
+num_folds <- 5
+
+# Create indices for cross-validation
+cv_indices <- sample(1:num_folds, size = nrow(train_data), replace = TRUE)
+
+# Define the model formula
+formula <- calories ~ age + gender + height + weight + steps + heart_rate + distance + resting_heart + intensity_karvonen + steps_times_distance
+
+# Perform cross-validation using cv.glm()
+cv_results <- cv.glm(train_data, glm(formula, data = train_data), K = num_folds)
+cv_mse <- cv_results$delta  # Extract MSE values from cross-validation
+
+# Average MSE across folds
+average_cv_mse <- mean(cv_mse)
+cat("Average Cross-Validated MSE:", average_cv_mse, "\n")
+
+# Fit the model on the entire training set
+final_lm.fit <- glm(formula, data = train_data)
+
+# Make predictions on the test set
+test_predictions <- predict(final_lm.fit, newdata = test_data)
+
+# Calculate test accuracy
+test_accuracy <- mean((test_data$calories - test_predictions)^2)
+cat("Test Accuracy (MSE) on Test Data:", test_accuracy, "\n")
+
+# Summary of the final model
+summary(final_lm.fit)
+
+# Plot diagnostics for the final model
+plot(final_lm.fit)
+
+```
+
+
+```{r}
+
+# Add age_squared and weight_squared columns to train_data
+train_data$age_squared <- train_data$age^2
+train_data$weight_squared <- train_data$weight^2
+test_data$age_squared <- test_data$age^2
+test_data$weight_squared <- test_data$weight^2
+
+
+# Number of folds for cross-validation
+num_folds <- 5
+
+# Create indices for cross-validation
+cv_indices <- sample(1:num_folds, size = nrow(train_data), replace = TRUE)
+
+# Initialize a vector to store cross-validated MSE values
+cv_mse <- numeric(num_folds)
+
+# Perform cross-validation
+for (fold in 1:num_folds) {
+  # Extract training and validation sets for the current fold
+  train_data_cv <- train_data[cv_indices != fold, ]
+  validation_data_cv <- train_data[cv_indices == fold, ]
+  
+  # Define the model formula
+  formula <- calories ~ age + age_squared + gender + height + weight + weight_squared + steps + heart_rate + distance + resting_heart + intensity_karvonen + steps_times_distance
+  
+  # Fit the model on the training set with nonlinear terms
+  lm.fit_cv <- glm(formula, data = train_data_cv)
+  
+  # Make predictions on the validation set
+  predictions <- predict(lm.fit_cv, newdata = validation_data_cv)
+  
+  # Calculate MSE for the current fold
+  cv_mse[fold] <- mean((validation_data_cv$calories - predictions)^2)
+}
+
+# Average MSE across folds
+average_cv_mse <- mean(cv_mse)
+cat("Average Cross-Validated MSE with Nonlinear Terms:", average_cv_mse, "\n")
+
+# Fit the model on the entire training set with nonlinear terms
+final_lm_fit <- glm(calories ~ age + age_squared + gender + height + weight + weight_squared + steps + heart_rate + distance + resting_heart + intensity_karvonen + steps_times_distance, data = train_data)
+
+# Make predictions on the test set
+# Remove quadratic terms from both train_data and test_data before making predictions
+train_data$age_squared <- NULL
+train_data$weight_squared <- NULL
+
+test_predictions <- predict(final_lm_fit, newdata = test_data)
+
+test_data$age_squared <- NULL
+test_data$weight_squared <- NULL
+
+# Calculate test accuracy (MSE)
+test_accuracy <- mean((test_data$calories - test_predictions)^2)
+cat("Test Accuracy (MSE) on Test Data:", test_accuracy, "\n")
+
+# Summary of the final model
+summary(final_lm_fit)
+
+# Plot diagnostics for the final model
+plot(final_lm_fit)
+
+
+
+```
+
+## Ridge Regression
+
+```{r}
+#install.packages("glmnet")
+
+# Extract predictor variables and response variable from the training data
+train_data <- train_data[, !colnames(train_data) %in% c("age_squared", "weight_squared")]
+X <- as.matrix(train_data[, -which(colnames(train_data) %in% "calories")])
+y <- train_data$calories
+
+# Standardize the predictor variables
+X_standardized <- scale(X)
+
+# Perform cross-validated ridge regression
+cv_ridge_model <- cv.glmnet(X_standardized, y, alpha = 0)
+
+# Optimal lambda from cross-validated ridge model
+optimal_lambda <- cv_ridge_model$lambda.min
+
+# Perform ridge regression using glmnet with the optimal lambda
+ridge_model <- glmnet(X_standardized, y, alpha = 0, lambda = optimal_lambda)
+
+# Extract coefficients for the optimal lambda
+ridge_coefficients_optimal <- coef(ridge_model)
+
+# Display the coefficients for the optimal lambda
+print(ridge_coefficients_optimal)
+plot(cv_ridge_model)
+```
+```{r}
+response_variable <- "calories"
+
+# Extract predictor variables and response variable from the test data
+test_data <- test_data[, !colnames(test_data) %in% c("age_squared", "weight_squared")]
+X_test <- as.matrix(test_data[, -which(colnames(test_data) %in% response_variable)])
+y_test <- test_data[[response_variable]]
+
+# Standardize the predictor variables using the mean and standard deviation from the training set
+X_test_standardized <- scale(X_test, center = attr(X_standardized, "scaled:center"), scale = attr(X_standardized, "scaled:scale"))
+
+# Make predictions on the test set
+predictions <- predict(ridge_model, newx = X_test_standardized, s = optimal_lambda)
+
+# Evaluate the performance of the model (e.g., using Mean Squared Error)
+mse <- mean((predictions - y_test)^2)
+print(mse)
+```
+
+## The Lasso
+
+```{r}
+response_variable <- "calories"
+
+# Extract predictor variables and response variable from the training data
+train_data <- train_data[, !colnames(train_data) %in% c("age_squared", "weight_squared")]
+X <- as.matrix(train_data[, -which(colnames(train_data) %in% response_variable)])
+y <- train_data[[response_variable]]
+
+# Reuse the standardized predictor variables from the ridge regression
+X_standardized <- scale(X)
+
+# Perform cross-validated Lasso regression
+cv_lasso_model <- cv.glmnet(X_standardized, y, alpha = 1)  # Use alpha = 1 for Lasso
+
+lasso_coefficients <- coef(cv_lasso_model)
+
+print(lasso_coefficients)
+
+# Plot the coefficient paths for different values of lambda
+plot(cv_lasso_model)
+```
+```{r}
+# Extract predictor variables and response variable from the test data
+test_data <- test_data[, !colnames(test_data) %in% c("age_squared", "weight_squared")]
+X_test <- as.matrix(test_data[, -which(colnames(test_data) %in% response_variable)])
+y_test <- test_data[[response_variable]]
+
+# Standardize the predictor variables using the mean and standard deviation from the training set
+X_test_standardized <- scale(X_test, center = attr(X_standardized, "scaled:center"), scale = attr(X_standardized, "scaled:scale"))
+
+# Make predictions on the test set
+predictions <- predict(cv_lasso_model, newx = X_test_standardized, s = "lambda.min")  # "lambda.min" for the optimal lambda
+
+# Evaluate the performance of the model (e.g., using Mean Squared Error)
+mse <- mean((predictions - y_test)^2)
+print(mse)
+```
+
+## SVM
+```{r}
+
+# Specify the response variable
+response_variable <- "calories"
+
+# Create a formula for the models
+formula <- as.formula(paste(response_variable, "~ ."))
+
+# Set up training control for cross-validation
+ctrl <- trainControl(method = "cv", number = 5)  # 5-fold cross-validation
+
+# Train Support Vector Machine (SVM) with Linear Kernel using cross-validation
+svm_linear_model_cv <- train(formula, data = train_data, method = "svmLinear", trControl = ctrl)
+
+# Print the summary of the cross-validated SVM with Linear Kernel model
+print(svm_linear_model_cv)
+
+# Make predictions on the test data using the cross-validated SVM with Linear Kernel model
+predictions_svm_linear_cv <- predict(svm_linear_model_cv, test_data)
+
+# Calculate Mean Squared Error (MSE) for SVM with Linear Kernel
+mse_svm_linear_cv <- mean((test_data$calories - predictions_svm_linear_cv)^2)
+print(paste("SVM with Linear Kernel - Mean Squared Error on Test Set (Cross-Validated):", mse_svm_linear_cv))
+
+# Train Support Vector Machine (SVM) with Radial Kernel using cross-validation
+svm_radial_model_cv <- train(formula, data = train_data, method = "svmRadial", trControl = ctrl)
+
+# Print the summary of the cross-validated SVM with Radial Kernel model
+print(svm_radial_model_cv)
+
+# Make predictions on the test data using the cross-validated SVM with Radial Kernel model
+predictions_svm_radial_cv <- predict(svm_radial_model_cv, test_data)
+
+# Calculate Mean Squared Error (MSE) for SVM with Radial Kernel
+mse_svm_radial_cv <- mean((test_data$calories - predictions_svm_radial_cv)^2)
+print(paste("SVM with Radial Kernel - Mean Squared Error on Test Set (Cross-Validated):", mse_svm_radial_cv))
+
+
+```
+
+## Random Forests 
+
+```{r}
+
+#install.packages("caret")
+
+# Specify the response variable
+response_variable <- "calories"
+
+# Create a formula for the random forest model
+formula <- as.formula(paste(response_variable, "~ ."))
+
+# Set up training control for cross-validation
+ctrl <- trainControl(method = "cv", number = 5)  # 5-fold cross-validation
+
+# Train the random forest model using cross-validation
+rf_model_cv <- train(formula, data = train_data, method = "rf", trControl = ctrl)
+
+# Print the summary of the cross-validated model
+print(rf_model_cv)
+plot(rf_model_cv)
+
+# Make predictions on the test data using the cross-validated model
+predictions_cv <- predict(rf_model_cv, test_data)
+
+# Calculate Mean Squared Error (MSE) or any other evaluation metric if needed
+mse_cv <- mean((test_data$calories - predictions_cv)^2)
+print(paste("Mean Squared Error on Test Set (Cross-Validated):", mse_cv))
+
+```
+## Gradient Boosting
+
+
+```{r}
+
+
+#set.seed(123)  # Set seed for reproducibility
+
+# Specify the response variable
+response_variable <- "calories"
+
+# Create a formula for the gradient boosting model
+formula <- as.formula(paste(response_variable, "~ ."))
+
+# Set up training control for cross-validation
+ctrl <- trainControl(method = "cv", number = 5)  # 5-fold cross-validation
+
+# Specify the tuning grid
+tuning_grid <- expand.grid(
+  n.trees = seq(100, 1000, by = 100),
+  interaction.depth = seq(2, 10, by = 2),
+  shrinkage = c(0.001, 0.01, 0.1),
+  n.minobsinnode = c(5, 10, 20)
+)
+
+# Train the gradient boosting model using cross-validation
+gbm_model_cv <- train(
+  formula,
+  data = train_data,
+  method = "gbm",
+  trControl = ctrl,
+  tuneGrid = tuning_grid,
+  verbose = FALSE
+)
+
+# Print the summary of the cross-validated model
+print(gbm_model_cv)
+
+# Make predictions on the test data using the cross-validated model
+predictions_cv <- predict(gbm_model_cv, newdata = test_data, n.trees = gbm_model_cv$bestTune$n.trees)
+
+# Calculate Mean Squared Error (MSE) or other evaluation metrics if needed
+mse_cv <- mean((test_data$calories - predictions_cv)^2)
+print(paste("Mean Squared Error on Test Set (Cross-Validated):", mse_cv))
+```
